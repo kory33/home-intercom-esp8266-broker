@@ -5,4 +5,6 @@
 
 PROJECT_NAME := home-intercom-esp8266-broker
 
+EXTRA_CXXFLAGS := -std=c++17
+
 include $(IDF_PATH)/make/project.mk
