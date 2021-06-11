@@ -69,9 +69,18 @@ class WifiController {
         }
     }
 
+    static void connection_event_handler_wrapper(void* event_handler_arg, esp_event_base_t event_base,
+                                                 [[maybe_unused]] int32_t event_id, void* event_data) {
+        const auto thisInstance = (WifiController*) event_handler_arg;
+        thisInstance->connection_event_handler(event_base, event_data);
+    }
+
     esp_err_t try_connection_once() {
+        ESP_LOGI(wifi_station_tag, "trying wifi connection...");
+
         // reset connection
         ESP_ERROR_CHECK(esp_wifi_disconnect())
+        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
 
         ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &connection_event_handler_wrapper, this))
         ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &connection_event_handler_wrapper, this))
@@ -79,13 +88,13 @@ class WifiController {
         ESP_ERROR_CHECK(esp_wifi_connect())
 
         /*
-         * Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
-         * number of re-tries (WIFI_FAIL_BIT). The bits are set by connection_event_handler
+         * Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed.
+         * The bits are set by connection_event_handler
          */
         EventBits_t bits =
                 xEventGroupWaitBits(
                         wifi_event_group,
-                        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,0, 0,
+                        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, 0, 0,
                         portMAX_DELAY);
 
         ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &connection_event_handler_wrapper))
@@ -95,35 +104,43 @@ class WifiController {
             ESP_LOGI(wifi_station_tag, "connected to ap SSID:%s password:%s", CONFIG_ESP_WIFI_SSID, CONFIG_ESP_WIFI_PASSWORD);
             return ESP_OK;
         } else {
+            ESP_LOGI(wifi_station_tag, "connection failed (to ap SSID:%s password:%s)", CONFIG_ESP_WIFI_SSID, CONFIG_ESP_WIFI_PASSWORD);
             return ESP_FAIL;
         }
     }
 
-    void reconnection_handler() {
+    static void reconnection_handler(void* task_arg) {
+        const auto thisInstance = (WifiController*) task_arg;
+
         ESP_LOGI(wifi_station_tag, "wifi disconnected. Reconnecting...");
 
         /*
          * connect_to_configured_ap() will internally register temporary listeners
          * so unregister the reconnection handler for a while
          */
-        ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &connection_event_handler_wrapper))
+        ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &reconnection_handler_wrapper))
 
-        connect_to_configured_ap();
+        ESP_LOGI(wifi_station_tag, "temporarily disabled reconnection handler");
+
+        thisInstance->connect_to_configured_ap();
 
         // re-register reconnection handler
-        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &connection_event_handler_wrapper, this))
-    }
+        ESP_ERROR_CHECK(thisInstance->configure_to_reconnect_on_disconnect())
 
-    static void connection_event_handler_wrapper(void* event_handler_arg, esp_event_base_t event_base,
-                                                 [[maybe_unused]] int32_t event_id, void* event_data) {
-        const auto thisInstance = (WifiController*) event_handler_arg;
-        thisInstance->connection_event_handler(event_base, event_data);
+        // this is a scheduled task, and is responsible for freeing up allocated spaces
+        vTaskDelete(nullptr);
     }
 
     static void reconnection_handler_wrapper(void* event_handler_arg, [[maybe_unused]] esp_event_base_t event_base,
                                              [[maybe_unused]] int32_t event_id, [[maybe_unused]] void* event_data) {
         const auto thisInstance = (WifiController*) event_handler_arg;
-        thisInstance->reconnection_handler();
+
+        // we may not unregister reconnection_handler_wrapper while this is being executed
+        // so we are scheduling the handler for later execution
+        xTaskCreate(
+                &reconnection_handler,
+                "reconnection", 1024, thisInstance,4,
+                nullptr);
     }
 
 public:
@@ -155,7 +172,11 @@ public:
     }
 
     esp_err_t configure_to_reconnect_on_disconnect() {
-        return esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &reconnection_handler_wrapper, this);
+        const auto result = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &reconnection_handler_wrapper, this);
+
+        ESP_LOGI(wifi_station_tag, "registered reconnection handler");
+
+        return result;
     }
 };
 
