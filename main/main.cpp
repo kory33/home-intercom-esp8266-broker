@@ -56,36 +56,72 @@ class WifiController {
     /* FreeRTOS event group to signal when we are connected*/
     EventGroupHandle_t wifi_event_group;
 
-    int retry_count = 0;
-
-    void event_handler(esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    void connection_event_handler(esp_event_base_t event_base, void *event_data) {
         if (event_base == WIFI_EVENT) {
-            if (event_id == WIFI_EVENT_STA_START) {
-                esp_wifi_connect();
-            } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
-                ESP_LOGI(wifi_station_tag, "wifi disconnected");
-
-                if (retry_count < CONFIG_ESP_MAXIMUM_RETRY) {
-                    // retry
-                    retry_count++;
-                    ESP_LOGI(wifi_station_tag, "retrying connection...");
-                    esp_wifi_connect();
-                } else {
-                    // give up
-                    xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
-                }
-            }
-        } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+            ESP_LOGI(wifi_station_tag, "wifi disconnected");
+            xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
+        } else if (event_base == IP_EVENT) {
             auto* event = (ip_event_got_ip_t*) event_data;
             ESP_LOGI(wifi_station_tag, "got ip:%s", ip4addr_ntoa(&event->ip_info.ip));
             xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
         }
     }
 
-    static void event_handler_wrapper(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-        const auto thisInstance = (WifiController*) event_handler_arg;
+    esp_err_t try_connection_once() {
+        // reset connection
+        ESP_ERROR_CHECK(esp_wifi_disconnect())
 
-        thisInstance->event_handler(event_base, event_id, event_data);
+        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &connection_event_handler_wrapper, this))
+        ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &connection_event_handler_wrapper, this))
+
+        ESP_ERROR_CHECK(esp_wifi_connect())
+
+        /*
+         * Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
+         * number of re-tries (WIFI_FAIL_BIT). The bits are set by connection_event_handler
+         */
+        EventBits_t bits =
+                xEventGroupWaitBits(
+                        wifi_event_group,
+                        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,0, 0,
+                        portMAX_DELAY);
+
+        ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &connection_event_handler_wrapper))
+        ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &connection_event_handler_wrapper))
+
+        if (bits & WIFI_CONNECTED_BIT) {
+            ESP_LOGI(wifi_station_tag, "connected to ap SSID:%s password:%s", CONFIG_ESP_WIFI_SSID, CONFIG_ESP_WIFI_PASSWORD);
+            return ESP_OK;
+        } else {
+            return ESP_FAIL;
+        }
+    }
+
+    void reconnection_handler() {
+        ESP_LOGI(wifi_station_tag, "wifi disconnected. Reconnecting...");
+
+        /*
+         * connect_to_configured_ap() will internally register temporary listeners
+         * so unregister the reconnection handler for a while
+         */
+        ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &connection_event_handler_wrapper))
+
+        connect_to_configured_ap();
+
+        // re-register reconnection handler
+        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &connection_event_handler_wrapper, this))
+    }
+
+    static void connection_event_handler_wrapper(void* event_handler_arg, esp_event_base_t event_base,
+                                                 [[maybe_unused]] int32_t event_id, void* event_data) {
+        const auto thisInstance = (WifiController*) event_handler_arg;
+        thisInstance->connection_event_handler(event_base, event_data);
+    }
+
+    static void reconnection_handler_wrapper(void* event_handler_arg, [[maybe_unused]] esp_event_base_t event_base,
+                                             [[maybe_unused]] int32_t event_id, [[maybe_unused]] void* event_data) {
+        const auto thisInstance = (WifiController*) event_handler_arg;
+        thisInstance->reconnection_handler();
     }
 
 public:
@@ -103,45 +139,21 @@ public:
         auto wifi_config = get_wifi_configuration();
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) )
         ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) )
+        ESP_ERROR_CHECK(esp_wifi_start() )
 
         ESP_LOGI(wifi_station_tag, "finished configuring wifi");
     }
 
     esp_err_t connect_to_configured_ap() {
-        constexpr auto process_event_bit = [](EventBits_t bits) {
-            // xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually happened.
-            if (bits & WIFI_CONNECTED_BIT) {
-                ESP_LOGI(wifi_station_tag, "connected to ap SSID:%s password:%s", CONFIG_ESP_WIFI_SSID, CONFIG_ESP_WIFI_PASSWORD);
+        for (;;) {
+            if (try_connection_once() == ESP_OK) {
                 return ESP_OK;
-            } else if (bits & WIFI_FAIL_BIT) {
-                ESP_LOGI(wifi_station_tag, "Failed to connect to SSID:%s, password:%s", CONFIG_ESP_WIFI_SSID, CONFIG_ESP_WIFI_PASSWORD);
-                return ESP_FAIL;
-            } else {
-                ESP_LOGE(wifi_station_tag, "UNEXPECTED EVENT");
-                return ESP_FAIL;
             }
-        };
+        }
+    }
 
-        ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler_wrapper, this))
-        ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler_wrapper, this))
-
-        retry_count = 0;
-        ESP_ERROR_CHECK(esp_wifi_start() )
-
-        /*
-         * Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
-         * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler
-         */
-        EventBits_t bits =
-                xEventGroupWaitBits(
-                        wifi_event_group,
-                        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,0, 0,
-                        portMAX_DELAY);
-
-        ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler_wrapper))
-        ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler_wrapper))
-
-        return process_event_bit(bits);
+    esp_err_t configure_to_reconnect_on_disconnect() {
+        return esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &reconnection_handler_wrapper, this);
     }
 };
 
@@ -198,6 +210,7 @@ __attribute__((unused)) void app_main() {
 
     auto wifi_controller = WifiController();
     ESP_ERROR_CHECK(wifi_controller.connect_to_configured_ap())
+    ESP_ERROR_CHECK(wifi_controller.configure_to_reconnect_on_disconnect())
 
     xTaskCreate(&process_command_loop, "process_cmd_loop", 1024, nullptr, 5, nullptr);
 }
