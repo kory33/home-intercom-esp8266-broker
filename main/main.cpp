@@ -13,8 +13,8 @@
 
 extern "C" {
 
-namespace initialization {
-    static void initialize_uart() {
+namespace custom_uart {
+    static void initialize() {
         /**
          * Initially baudrate is 115200 * 26 / 40 = 74880Hz
          * due to the crystal operating at 26MHz instead of 40MHz.
@@ -22,7 +22,7 @@ namespace initialization {
         uart_set_baudrate(CONFIG_CONSOLE_UART, 115200);
 
         /**
-         * initialize stdin/out
+         * connect_to_configured_ap stdin/out
          * https://github.com/espressif/esp-idf/issues/4564#issuecomment-569889317
          */
         setvbuf(stdin, nullptr, _IONBF, 0);
@@ -32,19 +32,47 @@ namespace initialization {
         esp_vfs_dev_uart_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
         esp_vfs_dev_uart_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
     }
+}
 
-    #define WIFI_CONNECTED_BIT BIT0
-    #define WIFI_FAIL_BIT      BIT1
+namespace custom_wifi {
+    static constexpr auto WIFI_CONNECTED_BIT = BIT0;
+    static constexpr auto WIFI_FAIL_BIT      = BIT1;
+
+    static constexpr auto wifi_station_tag = "wifi station";
 
     /* FreeRTOS event group to signal when we are connected*/
     static EventGroupHandle_t wifi_event_group;
 
-    static constexpr auto wifi_station_tag = "wifi station";
-
     static int retry_count = 0;
 
-    static void event_handler(__attribute__((unused)) void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
-    {
+    static wifi_config_t get_wifi_configuration() {
+        wifi_config_t wifi_config = {};
+        static_assert(sizeof(wifi_config.sta.ssid) >= sizeof(CONFIG_ESP_WIFI_SSID), "");
+        static_assert(sizeof(wifi_config.sta.password) >= sizeof(CONFIG_ESP_WIFI_PASSWORD), "");
+
+        memcpy(wifi_config.sta.ssid, CONFIG_ESP_WIFI_SSID, sizeof(CONFIG_ESP_WIFI_SSID) - 1);
+        memcpy(wifi_config.sta.password, CONFIG_ESP_WIFI_PASSWORD, sizeof(CONFIG_ESP_WIFI_PASSWORD) - 1);
+        wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+
+        return wifi_config;
+    }
+
+    static void initialize_wifi_and_tcpip() {
+        tcpip_adapter_init();
+
+        {
+            wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT()
+            ESP_ERROR_CHECK(esp_wifi_init(&cfg))
+
+            auto wifi_config = get_wifi_configuration();
+            ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) )
+            ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) )
+
+            ESP_LOGI(wifi_station_tag, "finished configuring wifi");
+        }
+    }
+
+    static void event_handler(__attribute__((unused)) void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
         if (event_base == WIFI_EVENT) {
             if (event_id == WIFI_EVENT_STA_START) {
                 esp_wifi_connect();
@@ -67,36 +95,18 @@ namespace initialization {
         }
     }
 
-    void initialize_wifi_station()
-    {
+    esp_err_t connect_to_configured_ap() {
         wifi_event_group = xEventGroupCreate();
-
-        tcpip_adapter_init();
-
-        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT()
-        ESP_ERROR_CHECK(esp_wifi_init(&cfg))
+        retry_count = 0;
 
         ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, nullptr))
         ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, nullptr))
-
-        wifi_config_t wifi_config = {};
-        static_assert(sizeof(wifi_config.sta.ssid) >= sizeof(CONFIG_ESP_WIFI_SSID), "");
-        static_assert(sizeof(wifi_config.sta.password) >= sizeof(CONFIG_ESP_WIFI_PASSWORD), "");
-
-        memcpy(wifi_config.sta.ssid, CONFIG_ESP_WIFI_SSID, sizeof(CONFIG_ESP_WIFI_SSID) - 1);
-        memcpy(wifi_config.sta.password, CONFIG_ESP_WIFI_PASSWORD, sizeof(CONFIG_ESP_WIFI_PASSWORD) - 1);
-        wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-
-        retry_count = 0;
-
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) )
-        ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) )
         ESP_ERROR_CHECK(esp_wifi_start() )
 
-        ESP_LOGI(wifi_station_tag, "initialize_wifi_station finished.");
-
-        /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
-         * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
+        /*
+         * Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
+         * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above)
+         */
         EventBits_t bits =
                 xEventGroupWaitBits(
                         wifi_event_group,
@@ -104,20 +114,22 @@ namespace initialization {
                         pdFALSE, pdFALSE,
                         portMAX_DELAY);
 
-        /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
-         * happened. */
-        if (bits & WIFI_CONNECTED_BIT) {
-            ESP_LOGI(wifi_station_tag, "connected to ap SSID:%s password:%s", CONFIG_ESP_WIFI_SSID, CONFIG_ESP_WIFI_PASSWORD);
-        } else if (bits & WIFI_FAIL_BIT) {
-            ESP_LOGI(wifi_station_tag, "Failed to connect to SSID:%s, password:%s", CONFIG_ESP_WIFI_SSID, CONFIG_ESP_WIFI_PASSWORD);
-        } else {
-            ESP_LOGE(wifi_station_tag, "UNEXPECTED EVENT");
-        }
-
         ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler))
         ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler))
 
         vEventGroupDelete(wifi_event_group);
+
+        // xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually happened.
+        if (bits & WIFI_CONNECTED_BIT) {
+            ESP_LOGI(wifi_station_tag, "connected to ap SSID:%s password:%s", CONFIG_ESP_WIFI_SSID, CONFIG_ESP_WIFI_PASSWORD);
+            return ESP_OK;
+        } else if (bits & WIFI_FAIL_BIT) {
+            ESP_LOGI(wifi_station_tag, "Failed to connect to SSID:%s, password:%s", CONFIG_ESP_WIFI_SSID, CONFIG_ESP_WIFI_PASSWORD);
+            return ESP_FAIL;
+        } else {
+            ESP_LOGE(wifi_station_tag, "UNEXPECTED EVENT");
+            return ESP_FAIL;
+        }
     }
 }
 
@@ -169,8 +181,10 @@ __attribute__((unused)) void app_main() {
 
     vTaskDelay(500);
 
-    initialization::initialize_uart();
-    initialization::initialize_wifi_station();
+    custom_uart::initialize();
+    custom_wifi::initialize_wifi_and_tcpip();
+
+    ESP_ERROR_CHECK(custom_wifi::connect_to_configured_ap())
 
     xTaskCreate(&process_command_loop, "process_cmd_loop", 1024, nullptr, 5, nullptr);
 }
