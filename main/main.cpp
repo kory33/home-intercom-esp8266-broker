@@ -280,47 +280,61 @@ class CustomCommandProcessor {
         );
     }
 
-    static void processConfirmStartupCommand() {
-        printf("C:STARTED");
-        fflush(stdout);
+    static auto processConfirmStartupCommand() {
+        return "C:STARTED";
     }
 
-    static void processNotifySoundDetectionCommand() {
-        printf("N:OK");
-        fflush(stdout);
+    static auto processNotifySoundDetectionCommand() {
+        return "N:OK";
     }
 
-    static void processConfirmRemoteAliveCommand() {
+    static auto processConfirmRemoteAliveCommand() {
         const auto path = "/a/check";
         const auto result = TLSConnectionHelper::send_https_request_and_check_status(url_at(path), get_request_to(path));
 
-        printf(result == ESP_OK ? "R:ALIVE" : "R:UNREACHABLE");
-        fflush(stdout);
+        return result == ESP_OK ? "R:ALIVE" : "R:UNREACHABLE";
+    }
+
+    std::string previous_output;
+
+    auto processPreviousOutputCommand() {
+        return previous_output;
     }
 
 public:
-    static void processCommand(unsigned const char command) {
+    void processCommand(unsigned const char command) {
         switch (command) {
             case 'C':
-                return processConfirmStartupCommand();
+                previous_output = processConfirmStartupCommand();
+                break;
             case 'N':
-                return processNotifySoundDetectionCommand();
+                previous_output = processNotifySoundDetectionCommand();
+                break;
             case 'R':
-                return processConfirmRemoteAliveCommand();
+                previous_output = processConfirmRemoteAliveCommand();
+                break;
+            case 'P':
+                previous_output = processPreviousOutputCommand();
+                break;
             default:
-                return;
+                break;
         }
+
+        printf("%s", previous_output.c_str());
+        fflush(stdout);
     }
 };
 
 _Noreturn static void process_command_loop(__attribute__((unused)) void *pvParameters) {
+    auto customCommandProcessor = CustomCommandProcessor();
+
     for (;;) {
         unsigned char command_input[2];
         const auto read_length = uart_read_bytes(CONFIG_CONSOLE_UART, command_input, 1, 1);
 
         if (read_length > 0) {
             uart_flush_input(CONFIG_CONSOLE_UART);
-            CustomCommandProcessor::processCommand(command_input[0]);
+            customCommandProcessor.processCommand(command_input[0]);
         }
     }
 }
@@ -335,7 +349,7 @@ __attribute__((unused)) void app_main() {
     ESP_ERROR_CHECK(wifi_controller.connect_to_configured_ap())
     ESP_ERROR_CHECK(wifi_controller.configure_to_reconnect_on_disconnect())
 
-    // setting this too high will cause the program to crash (1024 * 16 is too much, for example)
+    // Setting this too high will cause the program to crash. It seems like 1024 * 8 is enough.
     const auto stackDepth = 1024 * 8;
     xTaskCreate(&process_command_loop, "process_cmd_loop", stackDepth, nullptr, 5, nullptr);
 }
