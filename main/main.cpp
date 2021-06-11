@@ -2,6 +2,8 @@
 #include <esp_vfs_dev.h>
 #include <event_groups.h>
 #include <esp_wifi.h>
+#include <string>
+#include <esp_tls.h>
 
 #include "esp_netif.h"
 
@@ -157,19 +159,142 @@ public:
     }
 };
 
+// https://github.com/espressif/ESP8266_RTOS_SDK/blob/08e225dde23c386b4a2e8eda79e30b7e69bf4ef9/docs/en/api-guides/build-system.rst#embedding-binary-data
+extern const uint8_t server_root_cert_pem_start[] asm("_binary_server_root_cert_pem_start");
+extern const uint8_t server_root_cert_pem_end[]   asm("_binary_server_root_cert_pem_end");
+
+class TLSConnectionHelper {
+    static constexpr auto TAG = "tls_connection";
+
+    /**
+     * Given a TLS handler that is yet to send a request, write the content of request to the connection.
+     */
+    static esp_err_t send_full_request(esp_tls_t* tls, const std::string& request) {
+        const auto request_pointer = request.c_str();
+        const auto request_length = strlen(request_pointer);
+
+        size_t written_bytes = 0;
+        while(written_bytes < request_length) {
+            const int write_result = esp_tls_conn_write(tls, request_pointer + written_bytes, request_length - written_bytes); // NOLINT(cppcoreguidelines-narrowing-conversions)
+            if (write_result >= 0) {
+                ESP_LOGI(TAG, "%d bytes written", write_result);
+                written_bytes += write_result;
+            } else if (write_result != ESP_TLS_ERR_SSL_WANT_READ && write_result != ESP_TLS_ERR_SSL_WANT_WRITE) {
+                ESP_LOGE(TAG, "esp_tls_conn_write  returned 0x%x", write_result);
+                return ESP_FAIL;
+            }
+        }
+
+        return ESP_OK;
+    }
+
+    /**
+     * Given a TLS handler that is ready to receive a request, check if the response contains a HTTP status code 2xx.
+     */
+    static esp_err_t check_response_success(esp_tls_t* tls) {
+        /**
+         * We only need to get the HTTP status code and check that it is in a form of 2xx.
+         * This amounts to matching against the regex
+         *   ^.[^ ] 2
+         * For details see https://datatracker.ietf.org/doc/html/rfc2616#section-6.1.
+         */
+        auto has_met_space = false;
+        while (true) {
+            // prepare zero-cleared buffer
+            char buf[2]{};
+            const int read_result = esp_tls_conn_read(tls, (char *) buf, 1); // NOLINT(cppcoreguidelines-narrowing-conversions)
+
+            if (read_result == ESP_TLS_ERR_SSL_WANT_READ || read_result == ESP_TLS_ERR_SSL_WANT_WRITE) continue;
+
+            if (read_result < 0) {
+                ESP_LOGE(TAG, "esp_tls_conn_read  returned -0x%x", -read_result);
+                return ESP_FAIL;
+            }
+
+            if (read_result == 0) {
+                ESP_LOGI(TAG, "connection closed");
+                return ESP_FAIL;
+            }
+
+            if (has_met_space) {
+                // we are at the beginning of the status code,
+                // just need to check if the response code starts with 2
+                return buf[0] == '2' ? ESP_OK : ESP_FAIL;
+            } else {
+                if (buf[0] == ' ') {
+                    has_met_space = true;
+                }
+            }
+        }
+    }
+
+public:
+    static esp_err_t send_https_request_and_check_status(const std::string& url, const std::string& request) {
+        esp_tls_cfg_t cfg = {};
+        cfg.cacert_pem_buf = server_root_cert_pem_start;
+        cfg.cacert_pem_bytes = server_root_cert_pem_end - server_root_cert_pem_start;
+
+        esp_tls_t* tls = esp_tls_conn_http_new(url.c_str(), &cfg);
+
+        const auto result = [&] {
+            if(tls != nullptr) {
+                ESP_LOGI(TAG, "Connection established...");
+            } else {
+                ESP_LOGE(TAG, "Connection failed...");
+                return ESP_FAIL;
+            }
+
+            if (send_full_request(tls, request) != ESP_OK) {
+                return ESP_FAIL;
+            }
+
+            ESP_LOGI(TAG, "Reading HTTP response...");
+
+            return check_response_success(tls);
+        }();
+
+        esp_tls_conn_delete(tls);
+
+        return result;
+    }
+};
+
+[[maybe_unused]] extern const uint8_t secret_start[] asm("_binary_secret_start");
+[[maybe_unused]] extern const uint8_t secret_end[] asm("_binary_secret_end");
+
+using namespace std::string_literals;
+
 class CustomCommandProcessor {
+    static constexpr auto host = "www.howsmyssl.com";
+
+    static std::string url_at(const std::string& path) {
+        return "https://"s + host + path;
+    }
+
+    static std::string get_request_to(const std::string& path) {
+        // https://datatracker.ietf.org/doc/html/rfc2616#section-5.1
+        return (
+                "GET "s + url_at(path) + " HTTP/1.0\r\n" +
+                "Host: " + host + "\r\n" +
+                "User-Agent: esp-idf/1.0 esp32\r\n\r\n"
+        );
+    }
+
     static void processConfirmStartupCommand() {
-        printf("STARTED\t");
+        printf("C:STARTED");
         fflush(stdout);
     }
 
     static void processNotifySoundDetectionCommand() {
-        printf("DETECTED\t");
+        printf("N:OK");
         fflush(stdout);
     }
 
     static void processConfirmRemoteAliveCommand() {
-        printf("REMOTE ALIVE\t");
+        const auto path = "/a/check";
+        const auto result = TLSConnectionHelper::send_https_request_and_check_status(url_at(path), get_request_to(path));
+
+        printf(result == ESP_OK ? "R:ALIVE" : "R:UNREACHABLE");
         fflush(stdout);
     }
 
@@ -203,8 +328,6 @@ _Noreturn static void process_command_loop(__attribute__((unused)) void *pvParam
 __attribute__((unused)) void app_main() {
     ESP_ERROR_CHECK(esp_event_loop_create_default())
 
-    vTaskDelay(500);
-
     custom_uart::initialize();
     WifiController::initialize_wifi_and_tcpip();
 
@@ -212,7 +335,9 @@ __attribute__((unused)) void app_main() {
     ESP_ERROR_CHECK(wifi_controller.connect_to_configured_ap())
     ESP_ERROR_CHECK(wifi_controller.configure_to_reconnect_on_disconnect())
 
-    xTaskCreate(&process_command_loop, "process_cmd_loop", 1024, nullptr, 5, nullptr);
+    // setting this too high will cause the program to crash (1024 * 16 is too much, for example)
+    const auto stackDepth = 1024 * 8;
+    xTaskCreate(&process_command_loop, "process_cmd_loop", stackDepth, nullptr, 5, nullptr);
 }
 
 }
