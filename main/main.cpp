@@ -280,13 +280,15 @@ public:
     }
 };
 
-[[maybe_unused]] extern const uint8_t secret_start[] asm("_binary_secret_start");
-[[maybe_unused]] extern const uint8_t secret_end[] asm("_binary_secret_end");
+// null-terminated string
+extern const uint8_t secret_start[] asm("_binary_secret_start");
 
 using namespace std::string_literals;
 
 class CustomCommandProcessor {
-    static constexpr auto host = "www.howsmyssl.com";
+    static constexpr auto host = "intercom.kory33.net";
+
+    const std::string secret = std::string((char *)secret_start);
 
     static std::string url_at(const std::string& path) {
         return "https://"s + host + path;
@@ -294,26 +296,38 @@ class CustomCommandProcessor {
 
     static std::string get_request_to(const std::string& path) {
         // https://datatracker.ietf.org/doc/html/rfc2616#section-5.1
-        return (
-                "GET "s + url_at(path) + " HTTP/1.0\r\n" +
-                "Host: " + host + "\r\n" +
-                "User-Agent: esp-idf/1.0 esp32\r\n\r\n"
-        );
+        return
+            "GET "s + url_at(path) + " HTTP/1.0\r\n" +
+            "Host: " + host + "\r\n" +
+            "User-Agent: esp-idf/1.0 esp32\r\n" +
+            "\r\n";
+    }
+
+    std::string post_request_to(const std::string& path) {
+        // https://datatracker.ietf.org/doc/html/rfc2616#section-5.1
+        return
+            "POST "s + url_at(path) + " HTTP/1.0\r\n" +
+            "Host: " + host + "\r\n" +
+            "User-Agent: esp-idf/1.0 esp32\r\n" +
+            "Content-Length: " + std::to_string(secret.length()) + "\r\n" +
+            "\r\n" +
+            secret;
     }
 
     static auto processConfirmStartupCommand() {
         return "C:STARTED";
     }
 
-    static auto processNotifySoundDetectionCommand() {
-        return "N:OK";
+    auto processNotifySoundDetectionCommand() {
+        const auto result = TLSConnectionHelper::send_https_request_and_check_status(url_at("/"), post_request_to("/"));
+
+        return result == ESP_OK ? "N:OK" : "N:FAIL";
     }
 
     static auto processConfirmRemoteAliveCommand() {
-        const auto path = "/a/check";
-        const auto result = TLSConnectionHelper::send_https_request_and_check_status(url_at(path), get_request_to(path));
+        const auto result = TLSConnectionHelper::send_https_request_and_check_status(url_at("/"), get_request_to("/"));
 
-        return result == ESP_OK ? "R:ALIVE" : "R:UNREACHABLE";
+        return result == ESP_OK ? "R:OK" : "R:FAIL";
     }
 
     std::string previous_output;
