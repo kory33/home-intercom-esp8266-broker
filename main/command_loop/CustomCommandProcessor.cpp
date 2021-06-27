@@ -1,7 +1,7 @@
 #include "CustomCommandProcessor.hpp"
 
 #include <esp_err.h>
-#include "../tls/TLSConnectionHelper.hpp"
+#include "tls/TLSConnectionHelper.hpp"
 
 using namespace std::string_literals;
 

@@ -1,7 +1,7 @@
 #include <esp_event.h>
 
-#include "peripherals/custom_uart.hpp"
-#include "peripherals/wifi_controller.hpp"
+#include "command_loop/peripherals/custom_uart.hpp"
+#include "command_loop/peripherals/wifi_controller.hpp"
 
 #include "command_loop/entrypoint.hpp"
 

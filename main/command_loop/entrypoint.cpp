@@ -1,7 +1,7 @@
 #include "entrypoint.hpp"
 
 #include "CustomCommandProcessor.hpp"
-#include "../peripherals/custom_uart.hpp"
+#include "peripherals/custom_uart.hpp"
 
 [[noreturn]] void custom_command_processor::entrypoint(__attribute__((unused)) void *pvParameters) {
     auto customCommandProcessor = CustomCommandProcessor();
