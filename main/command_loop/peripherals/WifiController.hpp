@@ -1,10 +1,13 @@
 #pragma once
 
+#include "FreeRTOS.h"
 #include <event_groups.h>
 #include <esp_bit_defs.h>
 #include <esp_event.h>
 
 namespace custom_peripherals {
+    constexpr auto wifi_station_tag = "wifi station";
+
     class WifiController {
         static constexpr auto WIFI_CONNECTED_BIT = BIT0;
         static constexpr auto WIFI_FAIL_BIT      = BIT1;
@@ -34,6 +37,4 @@ namespace custom_peripherals {
 
         esp_err_t configure_to_reconnect_on_disconnect();
     };
-
-    void initialize_wifi_and_tcpip();
 }

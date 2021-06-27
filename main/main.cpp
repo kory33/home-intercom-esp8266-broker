@@ -1,7 +1,7 @@
 #include <esp_event.h>
 
 #include "command_loop/peripherals/custom_uart.hpp"
-#include "command_loop/peripherals/wifi_controller.hpp"
+#include "command_loop/peripherals/custom_wifi.hpp"
 
 #include "command_loop/entrypoint.hpp"
 
@@ -12,10 +12,6 @@ __attribute__((unused)) void app_main() {
 
     custom_peripherals::initialize_uart();
     custom_peripherals::initialize_wifi_and_tcpip();
-
-    auto wifi_controller = custom_peripherals::WifiController();
-    ESP_ERROR_CHECK(wifi_controller.connect_to_configured_ap())
-    ESP_ERROR_CHECK(wifi_controller.configure_to_reconnect_on_disconnect())
 
     // Setting this too high will cause the program to crash. It seems like 1024 * 8 is enough.
     const auto stackDepth = 1024 * 8;

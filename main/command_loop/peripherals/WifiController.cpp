@@ -1,9 +1,7 @@
 #include <esp_log.h>
 #include <cstring>
 #include <esp_wifi.h>
-#include "wifi_controller.hpp"
-
-static constexpr auto wifi_station_tag = "wifi station";
+#include "WifiController.hpp"
 
 esp_err_t custom_peripherals::WifiController::configure_to_reconnect_on_disconnect() {
     const auto result = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &reconnection_handler_wrapper, this);
@@ -19,33 +17,6 @@ esp_err_t custom_peripherals::WifiController::connect_to_configured_ap() {
             return ESP_OK;
         }
     }
-}
-
-wifi_config_t get_wifi_configuration() {
-    wifi_config_t wifi_config = {};
-
-    static_assert(sizeof(wifi_config.sta.ssid) >= sizeof(CONFIG_ESP_WIFI_SSID));
-    static_assert(sizeof(wifi_config.sta.password) >= sizeof(CONFIG_ESP_WIFI_PASSWORD));
-    memcpy(wifi_config.sta.ssid, CONFIG_ESP_WIFI_SSID, sizeof(CONFIG_ESP_WIFI_SSID) - 1);
-    memcpy(wifi_config.sta.password, CONFIG_ESP_WIFI_PASSWORD, sizeof(CONFIG_ESP_WIFI_PASSWORD) - 1);
-
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-
-    return wifi_config;
-}
-
-void custom_peripherals::initialize_wifi_and_tcpip() {
-    tcpip_adapter_init();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT()
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg))
-
-    auto wifi_config = get_wifi_configuration();
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) )
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) )
-    ESP_ERROR_CHECK(esp_wifi_start() )
-
-    ESP_LOGI(wifi_station_tag, "finished configuring wifi");
 }
 
 void custom_peripherals::WifiController::connection_event_handler(esp_event_base_t event_base, void *event_data) {
