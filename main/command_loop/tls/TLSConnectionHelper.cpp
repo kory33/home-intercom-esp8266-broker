@@ -28,66 +28,21 @@ esp_err_t send_full_request(esp_tls_t *tls, const std::string &request) {
     return ESP_OK;
 }
 
-esp_err_t check_response_success(esp_tls_t *tls) {
-    /**
-     * We only need to get the HTTP status code and check that it is in a form of 2xx.
-     * This amounts to matching against the regex
-     *   ^.[^ ] 2
-     * For details see https://datatracker.ietf.org/doc/html/rfc2616#section-6.1.
-     */
-    auto has_met_space = false;
-    while (true) {
-        // prepare zero-cleared buffer
-        char buf[2]{};
-        const int read_result = esp_tls_conn_read(tls, (char *) buf, 1); // NOLINT(cppcoreguidelines-narrowing-conversions)
-
-        if (read_result == ESP_TLS_ERR_SSL_WANT_READ || read_result == ESP_TLS_ERR_SSL_WANT_WRITE) continue;
-
-        if (read_result < 0) {
-            ESP_LOGE(TAG, "esp_tls_conn_read  returned -0x%x", -read_result);
-            return ESP_FAIL;
-        }
-
-        if (read_result == 0) {
-            ESP_LOGI(TAG, "connection closed");
-            return ESP_FAIL;
-        }
-
-        if (has_met_space) {
-            // we are at the beginning of the status code,
-            // just need to check if the response code starts with 2
-            return buf[0] == '2' ? ESP_OK : ESP_FAIL;
-        } else {
-            if (buf[0] == ' ') {
-                has_met_space = true;
-            }
-        }
-    }
-}
-
-esp_err_t custom_tls_connection::send_https_request_and_check_status(const std::string &url, const std::string &request) {
+esp_err_t custom_tls_connection::send_https_request(const std::string &url, const std::string &request) {
     esp_tls_cfg_t cfg = {};
     cfg.cacert_pem_buf = server_root_cert_pem_start;
     cfg.cacert_pem_bytes = server_root_cert_pem_end - server_root_cert_pem_start;
 
     esp_tls_t* tls = esp_tls_conn_http_new(url.c_str(), &cfg);
 
-    const auto result = [&] {
-        if(tls != nullptr) {
-            ESP_LOGI(TAG, "Connection established...");
-        } else {
-            ESP_LOGE(TAG, "Connection failed...");
-            return ESP_FAIL;
-        }
+    if(tls != nullptr) {
+        ESP_LOGI(TAG, "Connection established...");
+    } else {
+        ESP_LOGE(TAG, "Connection failed...");
+        return ESP_FAIL;
+    }
 
-        if (send_full_request(tls, request) != ESP_OK) {
-            return ESP_FAIL;
-        }
-
-        ESP_LOGI(TAG, "Reading HTTP response...");
-
-        return check_response_success(tls);
-    }();
+    const auto result = send_full_request(tls, request);
 
     esp_tls_conn_delete(tls);
 
